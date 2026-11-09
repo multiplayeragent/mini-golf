@@ -1,0 +1,21 @@
+{
+  "name": "Mini Golf",
+  "genre": "sports",
+  "dim": "3D",
+  "mode": "Versus",
+  "players": "1–8",
+  "hook": "Everyone putts at the same time.",
+  "how": "Drag back and let go to putt. Everyone plays the same hole at once and sees the other balls roll. Fewest strokes over six holes wins.",
+  "controls": "Drag back and let go, with a mouse or a finger",
+  "uses": [
+    ["Leaderboard", "The fewest strokes for a full round of the course."],
+    ["Host-run rounds", "The host's browser runs the hole timer and the scorecard; if it leaves, the next player takes over."],
+    ["Bots", "Bots putt alongside you until enough people join."],
+    ["Live sync", "Every ball rolls for everyone at once."]
+  ],
+  "ideas": [
+    "Add a windmill with real blades in front of the cup",
+    "Add a hole where the floor tilts",
+    "Make it a space course with low gravity"
+  ]
+}

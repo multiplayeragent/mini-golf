@@ -1,0 +1,744 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Mini Golf</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: #9fd8f5; }
+  body { font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #fff; user-select: none; -webkit-user-select: none; }
+  canvas { display: block; touch-action: none; }
+  .hud { position: fixed; pointer-events: none; text-shadow: 0 2px 4px #0008; font-weight: 800; }
+  #hole { top: max(12px, env(safe-area-inset-top)); left: max(16px, env(safe-area-inset-left)); font-size: 24px; line-height: 1.15; }
+  #hole small { display: block; font-size: 15px; font-weight: 700; opacity: .92; }
+  #clock { top: max(12px, env(safe-area-inset-top)); right: max(16px, env(safe-area-inset-right)); font-size: 24px; font-variant-numeric: tabular-nums; }
+  #clock.low { color: #ffd23f; }
+  #mini { top: calc(max(12px, env(safe-area-inset-top)) + 36px); right: max(16px, env(safe-area-inset-right)); font-size: 13px; min-width: 120px; }
+  #mini div { display: flex; justify-content: space-between; gap: 10px; } #mini .me { color: #ffe14d; }
+  #net { bottom: max(10px, env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%); font-size: 12px; font-weight: 600; opacity: .85; white-space: nowrap; }
+  #hint { bottom: calc(max(10px, env(safe-area-inset-bottom)) + 26px); left: 0; right: 0; text-align: center; font-size: 17px; transition: opacity .6s; }
+  #msg { top: 24%; left: 0; right: 0; text-align: center; font-size: 38px; color: #ffe14d; -webkit-text-stroke: 1.5px #6a3d00; transition: opacity .35s, transform .35s; opacity: 0; transform: scale(.8); }
+  #msg.on { opacity: 1; transform: scale(1); }
+  #over { position: fixed; inset: 0; display: grid; place-items: center; background: #0a2a1a66; }
+  #over[hidden], #again[hidden], #boardBox[hidden] { display: none; }
+  .card { width: min(440px, 92vw); max-height: 86vh; overflow: auto; padding: 18px; border-radius: 16px; background: #123524f2; border: 1px solid #ffffff2a; box-sizing: border-box; }
+  .card h2 { margin: 0 0 10px; font-size: 22px; }
+  .card h3 { margin: 14px 0 4px; font-size: 14px; color: #ffe14d; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+  th, td { padding: 4px 3px; text-align: center; } th { color: #9fd8b4; font-weight: 700; }
+  td:first-child, th:first-child { text-align: left; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  td.tot { font-weight: 800; } tr.me td { color: #ffe14d; font-weight: 700; }
+  td i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
+  td.good { color: #7dffb0; } td.bad { color: #ffb3a7; }
+  .card ol { margin: 0; padding-left: 24px; font-size: 14px; } .card li span { float: right; }
+  .card p { margin: 12px 0 0; font-size: 13px; opacity: .8; }
+  button.go { width: 100%; min-height: 48px; margin-top: 14px; border: 0; border-radius: 12px; background: #ffe14d; color: #2a1d00; font: 800 17px system-ui, sans-serif; cursor: pointer; }
+</style>
+<script src="https://cdn.multiplayeragent.com/sdk/mp.global.js"></script>
+<script type="importmap">{ "imports": { "three": "./libs/three.module.min.js" } }</script>
+</head>
+<body>
+<div class="hud" id="hole"></div>
+<div class="hud" id="clock"></div>
+<div class="hud" id="mini"></div>
+<div class="hud" id="hint"></div>
+<div class="hud" id="msg"></div>
+<div class="hud" id="net">Connecting…</div>
+<div id="over" hidden><div class="card">
+  <h2 id="overTitle">Scorecard</h2>
+  <table id="card"></table>
+  <div id="boardBox"><h3>Fewest strokes on this course</h3><ol id="board"><li>Loading…</li></ol></div>
+  <p id="next"></p>
+  <button class="go" id="again" hidden>Play again</button>
+</div></div>
+<script type="module">
+/* ═══ MINI GOLF · a Multiplayer Agent starter ════════════════════════════════════════
+ * Everyone putts at the same time. Versus, 1–8 players; bots fill empty seats.
+ *
+ * WHERE THINGS ARE (search for the "── " headers):
+ *   CONFIG ........ timers, ball physics, bots, and the HOLES (walls, cup, obstacles)
+ *   CONNECTION .... MP_CONNECT, joining, the offline room, who is host
+ *   PHYSICS ....... one function moves any ball: walls, bumpers, windmills, slopes, the cup
+ *   COURSE ........ builds the meshes of the hole being played, the camera framing
+ *   ROUND (HOST) .. hole timer, scorecard, next hole, and the bots. Only the host writes these.
+ *   MY BALL ....... aiming, putting, sinking. Each player writes only its own ball.
+ *   HUD & CARD .... hole info, timer, scorecard, leaderboard
+ *   INPUT ......... drag back and let go (mouse and touch are the same code)
+ *
+ * HOW THE MULTIPLAYER WORKS (a relay room: no server code):
+ *   - Each player simulates its OWN ball and writes it to its entity as `b` (one JSON
+ *     field: hole key, position, strokes, sunk) about 12 times a second while it rolls,
+ *     plus `hb` (heartbeat) once a second and `n`/`c` (name, color) once. Balls pass
+ *     through each other, so nobody needs anyone else's ball to play.
+ *   - The HOST is the lowest sessionId among live players (heartbeat seen in the last 3s),
+ *     worked out every frame. Only the host writes the shared fields `game` (id, version
+ *     `v`, phase, hole, timer, the scorecard) and `bots` (the bots' balls). A new host
+ *     adopts both from state and carries on.
+ *   - The host ends a hole when every ball is in (or out of strokes) or the timer runs out,
+ *     copies everyone's strokes into the scorecard, then moves to the next hole. Every
+ *     client puts its ball on the tee when it sees the hole change.
+ *   - Windmills spin on the clock (Date.now()), so they need no syncing.
+ *   - Intent: "again" {} from the final card asks the host to start a new round now.
+ *   - ?attract plays offline with bots only (the preview video is recorded from it).
+ *   - Leaderboard "fewest-strokes": your total for a full round, stored as 1000 - strokes
+ *     (boards keep the highest score), shown on the final card.
+ */
+import * as THREE from "three";
+
+// ── CONFIG ──────────────────────────────────────────────────────────────────────────
+const CONFIG = {
+  seats: 4,             // bots fill the course up to this many balls
+  holeTime: 60000,      // ms to play one hole
+  scoresFor: 6000,      // ms the scorecard shows between holes
+  finalFor: 20000,      // ms the final card shows before a new round starts
+  maxStrokes: 6,        // after this many you pick up; a hole you don't finish scores maxStrokes + 1
+  ballR: 0.3, cupR: 0.55,
+  maxPower: 16,         // ball speed of a full-power putt, units/s
+  rollDecel: 2.2,       // rolling friction, units/s²
+  drag: 0.6,            // extra slowdown that grows with speed, per second
+  wallBounce: 0.72,     // share of speed kept off a wall
+  bumperBounce: 1.15,   // bumpers kick the ball back a bit faster
+  capture: 7,           // the cup catches a ball slower than this
+  dragFull: 0.3,        // drag this share of the screen for a full-power putt
+  botWait: [700, 1900], // ms a bot waits before each putt
+  botAim: 0.05,         // how far off a bot's aim is, radians
+  botPower: 0.1,        // how far off a bot's power is, share
+  board: "fewest-strokes",
+  // The holes. x runs left-right, z from the tee (+) toward the cup (-). `walls` is the
+  // outline, in order. blocks [x, z, width, depth, turn], bumpers [x, z, radius],
+  // windmills [x, z, half-length, spin rad/s], slopes [x, z, width, depth, pushX, pushZ].
+  holes: [
+    { name: "Warm-up", par: 2, tee: [0, 9], cup: [0, -8.5], walls: [[-3.5, 11.5], [3.5, 11.5], [3.5, -11], [-3.5, -11]],
+      bumpers: [[0, -1.5, 0.7]] },
+    { name: "Dogleg", par: 3, tee: [0, 8.5], cup: [9, -6.5], walls: [[-3, 11], [3, 11], [3, -3], [12, -3], [12, -10], [-3, -10]],
+      bumpers: [[-0.3, -7, 0.8]], blocks: [[7.5, -6.5, 0.5, 2.4, 0]] },
+    { name: "Windmill", par: 3, tee: [0, 9.5], cup: [0, -9], walls: [[-4.5, 12], [4.5, 12], [4.5, -12], [-4.5, -12]],
+      blocks: [[-3.1, 0, 2.8, 0.9, 0], [3.1, 0, 2.8, 0.9, 0]], windmills: [[0, 0, 1.6, 1.7]] },
+    { name: "Zig-zag", par: 4, tee: [-2.5, 9.5], cup: [2.5, -9.5], walls: [[-5, 12], [5, 12], [5, -12], [-5, -12]],
+      blocks: [[-1.4, 4, 7.2, 0.6, 0], [1.4, -4, 7.2, 0.6, 0]], bumpers: [[-4.3, -11.3, 0.5], [4.3, 11.3, 0.5]] },
+    { name: "Bumper alley", par: 3, tee: [0, 10], cup: [0, -9.5], walls: [[-6, 12], [6, 12], [6, -12], [-6, -12]],
+      bumpers: [[-2.5, 3, 0.8], [2.5, 3, 0.8], [0, -1, 0.9], [-3.4, -5, 0.7], [3.4, -5, 0.7]], slopes: [[0, 6.5, 12, 3, 3.2, 0]] },
+    { name: "The funnel", par: 3, tee: [0, 10], cup: [0, -10], walls: [[-6, 12], [6, 12], [6, 2], [2, -4], [2, -12], [-2, -12], [-2, -4], [-6, 2]],
+      slopes: [[0, -1, 8, 6, 0, -3.4]], windmills: [[0, -7, 1.6, -2.2]] },
+  ],
+};
+const BOT_NAMES = ["Birdie", "Chip", "Bogey", "Putter", "Eagle", "Divot", "Fairway"];
+const COLORS = ["#ff4d6d", "#4dabff", "#ffd23f", "#52d273", "#c77dff", "#ff8c42", "#3de0d0", "#f5f5f5"];
+
+// ── CONNECTION ──────────────────────────────────────────────────────────────────────
+// The builder fills these in for this game. Downloaded from GitHub? Put your own pk_ key here.
+const MP_CONNECT = {
+  key: 'pk_REPLACE_ME',
+  room: 'mini-golf',
+  endpoint: 'wss://live.multiplayeragent.com',
+  apiUrl: 'https://api.multiplayeragent.com',
+};
+const ATTRACT = new URLSearchParams(location.search).has("attract");
+
+/** Same shape as the SDK client, kept in this tab: offline play and ?attract. */
+function localRoom() {
+  const id = "local", state = { entities: { players: { [id]: {} } }, shared: {} }, subs = [];
+  let queued = false;
+  const emit = () => { if (!queued) { queued = true; queueMicrotask(() => { queued = false; subs.forEach((f) => f(state)); }); } };
+  const put = (o, k, v) => { if (typeof k === "object") Object.assign(o, k); else o[k] = v; emit(); };
+  return {
+    sessionId: id, state, offline: true,
+    me: { set: (k, v) => put(state.entities.players[id], k, v) },
+    setShared: (k, v) => put(state.shared, k, v),
+    onState: (f) => { subs.push(f); f(state); }, onJoin() {}, onLeave() {}, on() {}, send() {},
+    onDisconnect() {}, onReconnect() {}, leave: async () => {},
+  };
+}
+async function connect() {
+  if (ATTRACT || typeof MP === "undefined") return localRoom();
+  try {
+    const mp = await Promise.race([MP.join({ ...MP_CONNECT }), new Promise((_, no) => setTimeout(() => no(new Error("timed out")), 10000))]);
+    window.mp = mp; // the builder calls window.mp.leave() when the page closes
+    return mp;
+  } catch (e) {
+    console.warn("Playing offline:", e && e.message);
+    return localRoom();
+  }
+}
+const parse = (v, fb) => { if (typeof v !== "string") return fb; try { return JSON.parse(v); } catch { return fb; } };
+let net = null, S = { entities: { players: {} }, shared: {} };
+const seenHb = new Map();
+function livePlayers() {
+  const now = performance.now(), out = [];
+  for (const [id, p] of Object.entries(S.entities.players || {})) {
+    const s = seenHb.get(id);
+    if (!s || s.hb !== p.hb) seenHb.set(id, { hb: p.hb, at: now });
+    if (id === net.sessionId || now - seenHb.get(id).at < 3000) out.push(id);
+  }
+  return out.sort();
+}
+const isHost = () => livePlayers()[0] === net.sessionId;
+
+// ── PHYSICS ─────────────────────────────────────────────────────────────────────────
+const WALL_T = 0.3, BAR_T = 0.4;
+/** The hole as physics sees it: wall segments, bumpers, windmills, slopes, the cup. */
+function buildCourse(i) {
+  const h = CONFIG.holes[i % CONFIG.holes.length], segs = [];
+  h.walls.forEach((p, k) => { const q = h.walls[(k + 1) % h.walls.length]; segs.push([p[0], p[1], q[0], q[1]]); });
+  for (const [x, z, w, d, turn = 0] of h.blocks || []) {
+    const c = Math.cos(turn), s = Math.sin(turn), pts = [[-w / 2, -d / 2], [w / 2, -d / 2], [w / 2, d / 2], [-w / 2, d / 2]].map(([a, b]) => [x + a * c - b * s, z + a * s + b * c]);
+    pts.forEach((p, k) => { const q = pts[(k + 1) % 4]; segs.push([p[0], p[1], q[0], q[1], 0]); });
+  }
+  return { i, h, segs, cup: { x: h.cup[0], z: h.cup[1] },
+    bumpers: (h.bumpers || []).map(([x, z, r]) => ({ x, z, r, flash: 0 })),
+    windmills: (h.windmills || []).map(([x, z, len, spin]) => ({ x, z, len, spin })),
+    slopes: (h.slopes || []).map(([x, z, w, d, fx, fz]) => ({ x, z, w, d, fx, fz })) };
+}
+/** Push a ball out of segment a-b and bounce it. `vel(px, pz)` is the segment's own velocity (windmills). */
+function hitSeg(b, ax, az, bx, bz, rad, bounce, vel) {
+  const dx = bx - ax, dz = bz - az, l = dx * dx + dz * dz;
+  const t = l ? Math.max(0, Math.min(1, ((b.x - ax) * dx + (b.z - az) * dz) / l)) : 0;
+  const cx = ax + dx * t, cz = az + dz * t, ox = b.x - cx, oz = b.z - cz, d = Math.hypot(ox, oz);
+  if (d >= rad || d < 1e-6) return false;
+  const nx = ox / d, nz = oz / d, [sx, sz] = vel ? vel(cx, cz) : [0, 0];
+  b.x = cx + nx * rad; b.z = cz + nz * rad;
+  const rvx = b.vx - sx, rvz = b.vz - sz, dot = rvx * nx + rvz * nz;
+  if (dot < 0) { b.vx = rvx - (1 + bounce) * dot * nx + sx; b.vz = rvz - (1 + bounce) * dot * nz + sz; }
+  return true;
+}
+function inside(poly, x, z) {
+  let ins = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, zi] = poly[i], [xj, zj] = poly[j];
+    if ((zi > z) !== (zj > z) && x < ((xj - xi) * (z - zi)) / (zj - zi) + xi) ins = !ins;
+  }
+  return ins;
+}
+/** Move one ball for dt seconds at clock time t (seconds). Returns "in", "bumper", "wall" or null. */
+function stepBall(b, dt, t, c) {
+  if (!b.moving || b.in) return null;
+  let ev = null;
+  const n = Math.max(1, Math.ceil((Math.hypot(b.vx, b.vz) * dt) / (CONFIG.ballR * 0.5))), h = dt / n;
+  for (let s = 0; s < n; s++) {
+    for (const sl of c.slopes) if (Math.abs(b.x - sl.x) < sl.w / 2 && Math.abs(b.z - sl.z) < sl.d / 2) { b.vx += sl.fx * h; b.vz += sl.fz * h; }
+    const v = Math.hypot(b.vx, b.vz);
+    if (v > 0) { const k = Math.max(0, v - (CONFIG.rollDecel + CONFIG.drag * v) * h) / v; b.vx *= k; b.vz *= k; }
+    b.x += b.vx * h; b.z += b.vz * h;
+    for (const g of c.segs) if (hitSeg(b, g[0], g[1], g[2], g[3], CONFIG.ballR + WALL_T / 2, CONFIG.wallBounce)) ev = ev || "wall";
+    for (const p of c.bumpers) {
+      const ox = b.x - p.x, oz = b.z - p.z, d = Math.hypot(ox, oz), rad = p.r + CONFIG.ballR;
+      if (d < rad && d > 1e-6) {
+        const nx = ox / d, nz = oz / d, dot = b.vx * nx + b.vz * nz;
+        b.x = p.x + nx * rad; b.z = p.z + nz * rad;
+        if (dot < 0) { b.vx -= (1 + CONFIG.bumperBounce) * dot * nx; b.vz -= (1 + CONFIG.bumperBounce) * dot * nz; }
+        const sp = Math.hypot(b.vx, b.vz); if (sp > CONFIG.maxPower) { b.vx *= CONFIG.maxPower / sp; b.vz *= CONFIG.maxPower / sp; }
+        if (!b.sim) p.flash = 1;
+        ev = "bumper";
+      }
+    }
+    for (const w of c.windmills) {
+      const a = w.spin * (t + s * h), ex = Math.cos(a) * w.len, ez = Math.sin(a) * w.len;
+      if (hitSeg(b, w.x - ex, w.z - ez, w.x + ex, w.z + ez, CONFIG.ballR + BAR_T / 2, 0.8, (px, pz) => [-(pz - w.z) * w.spin, (px - w.x) * w.spin])) ev = ev || "wall";
+    }
+    const dx = c.cup.x - b.x, dz = c.cup.z - b.z, d = Math.hypot(dx, dz);
+    if (d < CONFIG.cupR) {
+      if (Math.hypot(b.vx, b.vz) < CONFIG.capture) { Object.assign(b, { x: c.cup.x, z: c.cup.z, vx: 0, vz: 0, moving: false, in: 1 }); return "in"; }
+      if (d > 1e-3) { b.vx += (dx / d) * 20 * h; b.vz += (dz / d) * 20 * h; } // a fast ball lips out
+    }
+  }
+  if (!inside(c.h.walls, b.x, b.z)) { Object.assign(b, { x: b.restX, z: b.restZ, vx: 0, vz: 0 }); } // escaped: back where it was
+  if (Math.hypot(b.vx, b.vz) < 0.06) { b.vx = b.vz = 0; b.moving = false; }
+  return ev;
+}
+const gauss = () => (Math.random() + Math.random() + Math.random() - 1.5) * 1.15;
+/** Bot brain: try many putts in a quick simulation and keep the one that ends nearest the cup. */
+function planShot(b, c, skill) {
+  const t0 = Date.now() / 1000, direct = Math.atan2(c.cup.z - b.z, c.cup.x - b.x);
+  const angles = [];
+  for (let k = -4; k <= 4; k++) angles.push(direct + k * 0.05);
+  for (let k = 0; k < 24; k++) angles.push((k / 24) * Math.PI * 2);
+  let best = { a: direct, p: 0.5, score: Infinity };
+  for (const a of angles) for (const p of [0.45, 0.6, 0.3, 0.78, 0.18, 1]) { // middle powers first: a firm putt beats a dying one
+    const sim = { x: b.x, z: b.z, vx: Math.cos(a) * p * CONFIG.maxPower, vz: Math.sin(a) * p * CONFIG.maxPower, moving: true, in: 0, restX: b.x, restZ: b.z, sim: true };
+    let t = 0;
+    while (sim.moving && t < 7) { stepBall(sim, 1 / 20, t0 + t, c); t += 1 / 20; }
+    const score = sim.in ? -10 + p : Math.hypot(sim.x - c.cup.x, sim.z - c.cup.z);
+    if (score < best.score) best = { a, p, score };
+  }
+  return { a: best.a + gauss() * CONFIG.botAim * skill, p: Math.min(1, best.p * (1 + gauss() * CONFIG.botPower * skill)) };
+}
+
+// ── COURSE ──────────────────────────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(2, devicePixelRatio || 1));
+renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.prepend(renderer.domElement);
+const cv = renderer.domElement;
+const scene = new THREE.Scene();
+scene.background = new THREE.Color("#9fd8f5");
+scene.fog = new THREE.Fog("#9fd8f5", 60, 140);
+const camera = new THREE.PerspectiveCamera(40, 1, 0.5, 300);
+scene.add(new THREE.HemisphereLight("#ffffff", "#3d6b35", 1.3));
+const sun = new THREE.DirectionalLight("#fff3d6", 1.8);
+sun.position.set(14, 30, 10); sun.castShadow = true; sun.shadow.mapSize.set(1024, 1024);
+Object.assign(sun.shadow.camera, { left: -18, right: 18, top: 18, bottom: -18, near: 1, far: 80 }); scene.add(sun);
+
+function canvasTex(w, h, paint, repeat) {
+  const c = document.createElement("canvas"); c.width = w; c.height = h; paint(c.getContext("2d"), w, h);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
+  if (repeat) t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  return t;
+}
+function mulberry32(a) { return () => { a |= 0; a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+// The lawn around the course, and trees (the same for everyone: seeded)
+const lawnTex = canvasTex(64, 64, (c) => { c.fillStyle = "#4f9e45"; c.fillRect(0, 0, 64, 64); c.fillStyle = "#4a9641"; c.fillRect(0, 0, 32, 32); c.fillRect(32, 32, 32, 32); }, true);
+lawnTex.repeat.set(60, 60);
+const lawn = new THREE.Mesh(new THREE.PlaneGeometry(400, 400), new THREE.MeshStandardMaterial({ map: lawnTex, roughness: 1 }));
+lawn.rotation.x = -Math.PI / 2; lawn.position.y = -0.3; lawn.receiveShadow = true; scene.add(lawn);
+const seeded = mulberry32(11), TREES = 90;
+const trees = new THREE.InstancedMesh(new THREE.ConeGeometry(1.8, 5, 7), new THREE.MeshStandardMaterial({ color: "#2f7a3a", flatShading: true }), TREES);
+const trunks = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.35, 0.45, 1.4, 6), new THREE.MeshStandardMaterial({ color: "#7a4e2a" }), TREES);
+const mtx = new THREE.Matrix4();
+for (let i = 0; i < TREES; i++) {
+  const a = seeded() * Math.PI * 2, r = 19 + seeded() * 40, s = 0.7 + seeded() * 0.9, x = Math.cos(a) * r, z = Math.sin(a) * r;
+  mtx.compose(new THREE.Vector3(x, 2.4 * s, z), new THREE.Quaternion(), new THREE.Vector3(s, s, s)); trees.setMatrixAt(i, mtx);
+  mtx.compose(new THREE.Vector3(x, 0.3 * s, z), new THREE.Quaternion(), new THREE.Vector3(s, s, s)); trunks.setMatrixAt(i, mtx);
+}
+trees.castShadow = true; scene.add(trees, trunks);
+
+const greenTex = canvasTex(64, 64, (c) => { c.fillStyle = "#5fd35a"; c.fillRect(0, 0, 64, 64); c.fillStyle = "#56c851"; c.fillRect(0, 0, 64, 32); }, true);
+greenTex.repeat.set(0.25, 0.25);
+const arrowTex = canvasTex(64, 64, (c) => { c.fillStyle = "#ffffff"; c.globalAlpha = 0.45; for (const y of [8, 36]) { c.beginPath(); c.moveTo(12, y + 18); c.lineTo(32, y); c.lineTo(52, y + 18); c.lineTo(44, y + 22); c.lineTo(32, y + 10); c.lineTo(20, y + 22); c.fill(); } }, true);
+const bumperTex = canvasTex(64, 32, (c) => { c.fillStyle = "#ff4d4d"; c.fillRect(0, 0, 64, 32); c.fillStyle = "#fff"; c.fillRect(0, 12, 64, 8); });
+const MAT = {
+  green: new THREE.MeshStandardMaterial({ map: greenTex, roughness: 0.9 }),
+  rail: new THREE.MeshStandardMaterial({ color: "#f4ede0", roughness: 0.6 }),
+  block: new THREE.MeshStandardMaterial({ color: "#c9874a", roughness: 0.7 }),
+  bar: new THREE.MeshStandardMaterial({ color: "#ff6b8a", roughness: 0.5 }),
+  post: new THREE.MeshStandardMaterial({ color: "#7a5cff" }),
+  cup: new THREE.MeshBasicMaterial({ color: "#10150f" }),
+  tee: new THREE.MeshStandardMaterial({ color: "#3f9f3c" }),
+  flag: new THREE.MeshStandardMaterial({ color: "#ff3b3b", side: THREE.DoubleSide }),
+};
+let course = null, holeGroup = null;
+function box(w, h, d, mat, x, y, z, rotY = 0) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+  m.position.set(x, y, z); m.rotation.y = rotY; m.castShadow = m.receiveShadow = true; holeGroup.add(m); return m;
+}
+/** Build the meshes for hole `i` (and its physics) and frame the camera on it. */
+function showHole(i) {
+  if (holeGroup) { scene.remove(holeGroup); holeGroup.traverse((o) => o.geometry && o.geometry.dispose()); }
+  for (const [, v] of views) dropBall(v.g); views.clear(); // other balls come back from state on the new tee
+  if (myBall) myBall.userData.pts.length = 0;
+  holeGroup = new THREE.Group(); scene.add(holeGroup);
+  course = buildCourse(i);
+  const h = course.h, shape = new THREE.Shape(h.walls.map(([x, z]) => new THREE.Vector2(x, -z)));
+  const floor = new THREE.Mesh(new THREE.ShapeGeometry(shape).rotateX(-Math.PI / 2), MAT.green);
+  floor.receiveShadow = true; holeGroup.add(floor);
+  const base = new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: 0.3, bevelEnabled: false }).rotateX(-Math.PI / 2).translate(0, -0.31, 0), new THREE.MeshStandardMaterial({ color: "#8a6a45" }));
+  holeGroup.add(base);
+  for (const [ax, az, bx, bz, block] of course.segs) {
+    const len = Math.hypot(bx - ax, bz - az);
+    if (block === undefined) box(len + WALL_T, 0.5, WALL_T, MAT.rail, (ax + bx) / 2, 0.25, (az + bz) / 2, -Math.atan2(bz - az, bx - ax));
+  }
+  for (const [x, z, w, d, turn = 0] of h.blocks || []) box(w, 0.5, d, MAT.block, x, 0.25, z, -turn);
+  course.bumperMeshes = course.bumpers.map((p) => {
+    const m = new THREE.Mesh(new THREE.CylinderGeometry(p.r, p.r, 0.55, 24), new THREE.MeshStandardMaterial({ map: bumperTex, emissive: "#ffcf3f", emissiveIntensity: 0 }));
+    m.position.set(p.x, 0.27, p.z); m.castShadow = true; holeGroup.add(m); return m;
+  });
+  course.windmillMeshes = course.windmills.map((w) => {
+    const g = new THREE.Group(); g.position.set(w.x, 0, w.z);
+    const post = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.45, 1.6, 12), MAT.post); post.position.y = 0.8; post.castShadow = true;
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(w.len * 2, 0.45, BAR_T), MAT.bar); bar.position.y = 0.3; bar.castShadow = true;
+    const cap = new THREE.Mesh(new THREE.SphereGeometry(0.45, 16, 10), MAT.bar); cap.position.y = 1.65;
+    g.add(post, bar, cap); holeGroup.add(g); return g;
+  });
+  for (const sl of course.slopes) { // arrows drawn pointing "up" the texture, turned to the push
+    const alongX = Math.abs(sl.fx) > Math.abs(sl.fz), along = alongX ? sl.w : sl.d, across = alongX ? sl.d : sl.w;
+    const tex = arrowTex.clone(); tex.needsUpdate = true; tex.repeat.set(across / 2, along / 2);
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(across, along).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false }));
+    m.rotation.y = Math.atan2(-sl.fx, -sl.fz); m.position.set(sl.x, 0.015, sl.z); holeGroup.add(m);
+  }
+  const cup = new THREE.Mesh(new THREE.CircleGeometry(CONFIG.cupR, 28), MAT.cup); cup.rotation.x = -Math.PI / 2; cup.position.set(course.cup.x, 0.012, course.cup.z); holeGroup.add(cup);
+  const rim = new THREE.Mesh(new THREE.RingGeometry(CONFIG.cupR, CONFIG.cupR + 0.08, 28), MAT.rail); rim.rotation.x = -Math.PI / 2; rim.position.set(course.cup.x, 0.014, course.cup.z); holeGroup.add(rim);
+  const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 2.6, 6), MAT.rail); pole.position.set(course.cup.x, 1.3, course.cup.z); pole.castShadow = true; holeGroup.add(pole);
+  const flag = new THREE.Mesh(new THREE.PlaneGeometry(1, 0.6), MAT.flag); flag.geometry.translate(0.5, 0, 0); flag.position.set(course.cup.x, 2.25, course.cup.z); holeGroup.add(flag);
+  course.flag = flag;
+  const tee = new THREE.Mesh(new THREE.PlaneGeometry(2.6, 1.2), MAT.tee); tee.rotation.x = -Math.PI / 2; tee.position.set(h.tee[0], 0.01, h.tee[1]); holeGroup.add(tee);
+  frameHole();
+}
+// The camera looks at the whole hole: from behind the tee on a tall screen, from the side on a wide one.
+const cam = { pos: new THREE.Vector3(0, 40, 30), look: new THREE.Vector3(), wantPos: new THREE.Vector3(0, 40, 30), wantLook: new THREE.Vector3(), d: 30 };
+function frameHole() {
+  if (!course) return;
+  const xs = course.h.walls.map((p) => p[0]), zs = course.h.walls.map((p) => p[1]);
+  const bw = Math.max(...xs) - Math.min(...xs), bd = Math.max(...zs) - Math.min(...zs), cx = (Math.max(...xs) + Math.min(...xs)) / 2, cz = (Math.max(...zs) + Math.min(...zs)) / 2;
+  const A = innerWidth / innerHeight, tanV = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)), el = ATTRACT ? 0.95 : 1.05;
+  const dist = (across, deep) => Math.max(((deep * Math.sin(el)) / 2 + 1.6) / tanV, (across / 2 + 1) / (tanV * A)) * 1.08;
+  const front = dist(bw, bd), side = dist(bd, bw), fromSide = side < front * 0.9, d = fromSide ? side : front;
+  cam.wantLook.set(cx, 0, cz + (fromSide ? 0 : 0.6));
+  cam.wantPos.set(cx + (fromSide ? Math.cos(el) * d : 0), Math.sin(el) * d, cz + (fromSide ? 0 : Math.cos(el) * d));
+  cam.d = d;
+}
+function fit() { renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); frameHole(); }
+addEventListener("resize", fit); addEventListener("orientationchange", fit); fit();
+
+// Balls: one mesh per ball, with a name tag and a short trail.
+function makeBall(color, name) {
+  const g = new THREE.Group();
+  const ball = new THREE.Mesh(new THREE.SphereGeometry(CONFIG.ballR, 20, 14), new THREE.MeshStandardMaterial({ color, roughness: 0.35 }));
+  ball.position.y = CONFIG.ballR; ball.castShadow = true; g.add(ball);
+  if (name) {
+    const tex = canvasTex(256, 64, (c) => { c.font = "bold 34px system-ui"; c.textAlign = "center"; c.lineWidth = 6; c.strokeStyle = "#000a"; c.strokeText(name, 128, 44); c.fillStyle = "#fff"; c.fillText(name, 128, 44); });
+    const tag = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false })); tag.position.y = 1.1; g.add(tag); g.userData.tag = tag;
+  }
+  const trail = new THREE.Line(new THREE.BufferGeometry().setFromPoints(Array.from({ length: 14 }, () => new THREE.Vector3())), new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.55 }));
+  trail.frustumCulled = false; scene.add(trail);
+  g.userData.trail = trail; g.userData.pts = [];
+  if (ATTRACT) g.scale.setScalar(1.35); // the preview video is small: bigger balls read better
+  scene.add(g); return g;
+}
+function placeBall(g, x, z, sunk) {
+  const pts = g.userData.pts, last = pts[pts.length - 1];
+  if (!last || Math.hypot(last.x - x, last.z - z) > 0.25) { pts.push({ x, z }); if (pts.length > 14) pts.shift(); }
+  else if (pts.length > 1 && Math.random() < 0.15) pts.shift();
+  const pos = g.userData.trail.geometry.attributes.position;
+  for (let i = 0; i < 14; i++) { const p = pts[Math.max(0, pts.length - 1 - i)] || { x, z }; pos.setXYZ(i, p.x, 0.12, p.z); }
+  pos.needsUpdate = true;
+  g.position.set(x, sunk ? -0.5 : 0, z);
+  if (g.userData.tag) { const s = cam.d * 0.07; g.userData.tag.scale.set(s, s / 4, 1); g.userData.tag.position.y = 0.6 + s * 0.12; g.userData.tag.visible = !sunk; }
+}
+function dropBall(g) { scene.remove(g.userData.trail); scene.remove(g); }
+
+// Confetti: a pool of small cubes, reused.
+const CONF = 160, confetti = new THREE.InstancedMesh(new THREE.BoxGeometry(0.14, 0.14, 0.14), new THREE.MeshBasicMaterial({ color: "#fff" }), CONF);
+confetti.instanceMatrix.setUsage(THREE.DynamicDrawUsage); confetti.frustumCulled = false; scene.add(confetti);
+const bits = Array.from({ length: CONF }, () => ({ life: 0, x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0 }));
+let nextBit = 0;
+function burst(x, z, color, n = 40) {
+  const col = new THREE.Color(color), alt = new THREE.Color("#ffe14d");
+  for (let k = 0; k < n; k++) {
+    const b = bits[nextBit], i = nextBit; nextBit = (nextBit + 1) % CONF;
+    const a = Math.random() * Math.PI * 2, s = 1.5 + Math.random() * 3.5;
+    Object.assign(b, { life: 1.2, x, y: 0.3, z, vx: Math.cos(a) * s, vy: 4 + Math.random() * 4, vz: Math.sin(a) * s });
+    confetti.setColorAt(i, k % 3 ? col : alt);
+  }
+  confetti.instanceColor.needsUpdate = true;
+}
+function tickConfetti(dt) {
+  bits.forEach((b, i) => {
+    if (b.life > 0) { b.life -= dt; b.vy -= 12 * dt; b.x += b.vx * dt; b.y = Math.max(0.05, b.y + b.vy * dt); b.z += b.vz * dt; }
+    const s = b.life > 0 ? Math.min(1, b.life * 2) : 0;
+    mtx.compose(new THREE.Vector3(b.x, b.y, b.z), new THREE.Quaternion().setFromEuler(new THREE.Euler(b.life * 9, b.life * 7, 0)), new THREE.Vector3(s, s, s));
+    confetti.setMatrixAt(i, mtx);
+  });
+  confetti.instanceMatrix.needsUpdate = true;
+}
+for (let i = 0; i < CONF; i++) confetti.setColorAt(i, new THREE.Color("#fff"));
+
+// Sound: tiny WebAudio blips, started by the first touch or click.
+let actx = null;
+function beep(freq, dur, type = "sine", vol = 0.15) {
+  if (!actx) return;
+  const o = actx.createOscillator(), g = actx.createGain(); o.type = type; o.frequency.value = freq;
+  g.gain.setValueAtTime(vol, actx.currentTime); g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + dur);
+  o.connect(g).connect(actx.destination); o.start(); o.stop(actx.currentTime + dur);
+}
+
+// ── ROUND (HOST) ────────────────────────────────────────────────────────────────────
+const host = { bots: new Map(), wasHost: false, last: null, botKey: "", doneAt: 0, lastBots: 0, planned: false };
+/** The round as state has it, or the host's own newer write that hasn't come back yet. `v` only goes up. */
+function game() {
+  const g = parse(S.shared.game, null);
+  return host.last && isHost() && (!g || host.last.v > g.v) ? host.last : g;
+}
+function writeGame(g) { g = { ...g, v: (game()?.v ?? 0) + 1 }; host.last = g; net.setShared("game", JSON.stringify(g)); return g; }
+const keyOf = (g) => `g${g.id}h${g.hole}`;
+const newRound = (id) => writeGame({ id, phase: "play", hole: ATTRACT ? 2 : 0, endsAt: Date.now() + CONFIG.holeTime, card: {} });
+/** A spot on the tee for ball number n, so balls don't all start in one place. */
+function teeSpot(n) { const [x, z] = course.h.tee; return { x: x + ((n % 4) - 1.5) * 0.65, z: z + Math.floor(n / 4) * 0.7 }; }
+
+/** The bots' balls on hole `key`: the host's own copy, or what it last wrote to state. */
+function botList(key) {
+  if (isHost()) return host.botKey !== key ? [] : [...host.bots.values()].map((b) => ({ i: b.id, n: b.name, c: b.color, x: +b.x.toFixed(2), z: +b.z.toFixed(2), st: b.st, in: b.in }));
+  const saved = parse(S.shared.bots, { k: "", list: [] });
+  return saved.k === key ? saved.list || [] : [];
+}
+/** Every ball on this hole as { id, name, color, x, z, st, in, bot, mine }. */
+function balls(g) {
+  const out = [], key = keyOf(g);
+  for (const [id, p] of Object.entries(S.entities.players || {})) {
+    if (id === net.sessionId) { out.push({ id, name: myName, color: myColor, x: me.x, z: me.z, st: me.st, in: me.in, mine: true }); continue; }
+    const b = parse(p.b, null); if (b && b.k === key) out.push({ id, name: p.n || "Player", color: p.c || "#ccc", x: b.x, z: b.z, st: b.st, in: b.in });
+  }
+  for (const b of botList(key)) out.push({ id: b.i, name: b.n, color: b.c, x: b.x, z: b.z, st: b.st, in: b.in, bot: true });
+  return out;
+}
+const finished = (b) => b.in || b.st >= CONFIG.maxStrokes;
+
+function resetBots(g) {
+  const humans = livePlayers().length, want = Math.max(0, CONFIG.seats - humans);
+  const keep = [...host.bots.values()].slice(0, want);
+  host.bots.clear(); keep.forEach((b) => host.bots.set(b.id, b));
+  while (host.bots.size < want) {
+    const used = new Set([...host.bots.values()].map((b) => b.name)), name = BOT_NAMES.find((n) => !used.has(n)) || "Bot";
+    const used2 = new Set(balls(g).map((b) => b.color)), color = COLORS.find((c) => !used2.has(c) && ![...host.bots.values()].some((b) => b.color === c)) || "#ccc";
+    const id = "b" + Math.random().toString(36).slice(2, 6);
+    host.bots.set(id, { id, name, color, skill: 0.7 + Math.random() * 0.8 });
+  }
+  let n = humans;
+  for (const b of host.bots.values()) { const s = teeSpot(n++); Object.assign(b, { x: s.x, z: s.z, restX: s.x, restZ: s.z, vx: 0, vz: 0, moving: false, st: 0, in: 0, nextAt: performance.now() + 300 + Math.random() * (CONFIG.botWait[1] - 300) }); }
+  host.botKey = keyOf(g); host.doneAt = 0;
+}
+
+function hostTick(dt, now) {
+  if (!host.wasHost) { // adopt the bots exactly as state has them
+    host.wasHost = true; host.bots.clear();
+    const saved = parse(S.shared.bots, { k: "", list: [] });
+    for (const b of saved.list || []) host.bots.set(b.i, { id: b.i, name: b.n, color: b.c, x: b.x, z: b.z, restX: b.x, restZ: b.z, vx: 0, vz: 0, moving: false, st: b.st, in: b.in, skill: 1, nextAt: now + 800 });
+    host.botKey = saved.k || "";
+  }
+  let g = game();
+  if (!g) g = newRound(1);
+  if (course.i !== g.hole % CONFIG.holes.length) showHole(g.hole);
+  if (host.botKey !== keyOf(g)) resetBots(g);
+  const t = Date.now();
+  if (g.phase === "play") {
+    const all = balls(g), humansIn = livePlayers().every((id) => all.some((b) => b.id === id));
+    if (all.every(finished) && humansIn) { if (!host.doneAt) host.doneAt = now + (ATTRACT ? 700 : 1500); } else host.doneAt = 0;
+    if ((host.doneAt && now > host.doneAt) || t > g.endsAt) {
+      const card = { ...g.card };
+      for (const b of all) {
+        const row = card[b.id] || { n: b.mine ? myName : b.name, c: b.color, s: [] };
+        row.s = [...row.s]; row.s[g.hole] = b.in ? b.st : CONFIG.maxStrokes + 1; card[b.id] = row;
+      }
+      g = writeGame({ ...g, phase: "scores", endsAt: t + CONFIG.scoresFor, card });
+    }
+  } else if (g.phase === "scores" && t > g.endsAt) {
+    if (g.hole + 1 < CONFIG.holes.length && !(ATTRACT && g.hole >= 4)) g = writeGame({ ...g, phase: "play", hole: g.hole + 1, endsAt: t + CONFIG.holeTime });
+    else g = writeGame({ ...g, phase: "final", endsAt: t + CONFIG.finalFor });
+  } else if (g.phase === "final" && t > g.endsAt) newRound(g.id + 1);
+  // Bots: wait, plan, putt. At most one bot plans per frame (planning runs a quick simulation).
+  host.planned = false;
+  const tSec = t / 1000;
+  for (const b of host.bots.values()) {
+    if (g.phase !== "play" || host.botKey !== keyOf(g) || finished(b)) continue;
+    if (b.moving) { const ev = stepBall(b, dt, tSec, course); if (ev === "in") { burst(b.x, b.z, b.color); beep(880, 0.15, "sine", 0.06); } if (!b.moving) b.nextAt = now + CONFIG.botWait[0] + Math.random() * (CONFIG.botWait[1] - CONFIG.botWait[0]); }
+    else if (now > b.nextAt && !host.planned) {
+      host.planned = true;
+      const shot = planShot(b, course, b.skill);
+      Object.assign(b, { restX: b.x, restZ: b.z, vx: Math.cos(shot.a) * shot.p * CONFIG.maxPower, vz: Math.sin(shot.a) * shot.p * CONFIG.maxPower, moving: true, st: b.st + 1 });
+    }
+  }
+  const moving = [...host.bots.values()].some((b) => b.moving);
+  if (now - host.lastBots > (moving ? 90 : 1000)) { host.lastBots = now; net.setShared("bots", JSON.stringify({ k: host.botKey, list: botList(host.botKey) })); }
+}
+
+// ── MY BALL ─────────────────────────────────────────────────────────────────────────
+const myName = (() => { try { return localStorage.getItem("mpa-name") || ""; } catch { return ""; } })() ||
+  ["Lucky", "Happy", "Sunny", "Breezy", "Zippy", "Plucky"][Math.floor(Math.random() * 6)] + " " + ["Putter", "Birdie", "Wedge", "Caddie", "Eagle"][Math.floor(Math.random() * 5)];
+let myColor = COLORS[0]; // picked on join: the first color nobody in the room has
+const me = { x: 0, z: 0, vx: 0, vz: 0, restX: 0, restZ: 0, moving: false, st: 0, in: 0, key: "", g: null, lastSend: 0, sent: "", putts: 0, submitted: -1, nextAuto: 0 };
+let aim = null; // the drag in progress: { sx, sy, x, y }
+
+function resetToTee(g) {
+  me.key = keyOf(g);
+  const s = teeSpot(Math.max(0, livePlayers().indexOf(net.sessionId)));
+  Object.assign(me, { x: s.x, z: s.z, restX: s.x, restZ: s.z, vx: 0, vz: 0, moving: false, st: 0, in: 0, nextAuto: performance.now() + 900 });
+  aim = null; $("over").hidden = true;
+  if (!ATTRACT) toast(`Hole ${g.hole + 1} · Par ${course.h.par}`, 1400);
+}
+const canPutt = (g) => g && g.phase === "play" && me.key === keyOf(g) && !me.moving && !finished(me);
+function putt(angle, power) {
+  Object.assign(me, { restX: me.x, restZ: me.z, vx: Math.cos(angle) * power * CONFIG.maxPower, vz: Math.sin(angle) * power * CONFIG.maxPower, moving: true, st: me.st + 1 });
+  me.putts++; beep(420 + power * 300, 0.07, "triangle", 0.2); publish(true);
+}
+function myTick(dt, g) {
+  if (me.key !== keyOf(g)) resetToTee(g);
+  if (ATTRACT && canPutt(g)) { // the preview putts for you, like a bot
+    if (!me.nextAuto) me.nextAuto = performance.now() + 300 + Math.random() * 600;
+    else if (performance.now() > me.nextAuto) { me.nextAuto = 0; const s = planShot(me, course, 1); putt(s.a, s.p); }
+  }
+  const wasMoving = me.moving, ev = stepBall(me, dt, Date.now() / 1000, course);
+  if (ev === "wall") beep(240, 0.04, "square", 0.04);
+  if (ev === "bumper") beep(700, 0.06, "square", 0.06);
+  if (ev === "in") { burst(me.x, me.z, myColor, 60); beep(660, 0.12); setTimeout(() => beep(990, 0.2), 110); if (!ATTRACT) toast(callout(me.st, course.h.par)); }
+  if (wasMoving && !me.moving && !me.in && me.st >= CONFIG.maxStrokes && !ATTRACT) toast(`Picked up: ${CONFIG.maxStrokes + 1}`);
+  publish(false);
+}
+function callout(st, par) {
+  if (st === 1) return "Hole in one!";
+  return { [-3]: "Albatross!", [-2]: "Eagle!", [-1]: "Birdie!", 0: "Par", 1: "Bogey" }[st - par] || `${st} strokes`;
+}
+function publish(force) {
+  const now = performance.now();
+  if (!force && now - me.lastSend < (me.moving ? 80 : 400)) return;
+  const v = JSON.stringify({ k: me.key, x: +me.x.toFixed(2), z: +me.z.toFixed(2), st: me.st, in: me.in });
+  if (v === me.sent && !force) return;
+  me.lastSend = now; me.sent = v; net.me.set("b", v);
+}
+/** The putt the current drag would make: angle in the world, power 0..1. */
+const ray = new THREE.Raycaster(), groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), hit = new THREE.Vector3();
+function aimShot() {
+  if (!aim) return null;
+  const dx = aim.sx - aim.x, dy = aim.sy - aim.y, len = Math.hypot(dx, dy);
+  const power = Math.min(1, len / (Math.min(innerWidth, innerHeight) * CONFIG.dragFull));
+  if (power < 0.04) return null;
+  const p = new THREE.Vector3(me.x, 0, me.z).project(camera), k = Math.min(1, 60 / len);
+  ray.setFromCamera(new THREE.Vector2(p.x + ((dx * k) / innerWidth) * 2, p.y - ((dy * k) / innerHeight) * 2), camera);
+  if (!ray.ray.intersectPlane(groundPlane, hit)) return null;
+  return { a: Math.atan2(hit.z - me.z, hit.x - me.x), p: power };
+}
+// The aim arrow on the ground, and the "your turn" ring.
+const arrowShape = new THREE.Shape([[0, -0.12], [0.8, -0.12], [0.8, -0.3], [1.2, 0], [0.8, 0.3], [0.8, 0.12], [0, 0.12]].map(([x, y]) => new THREE.Vector2(x, y)));
+const arrow = new THREE.Mesh(new THREE.ShapeGeometry(arrowShape).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color: "#fff", transparent: true, opacity: 0.9, depthWrite: false }));
+arrow.visible = false; scene.add(arrow);
+const ring = new THREE.Mesh(new THREE.RingGeometry(0.45, 0.55, 32).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color: "#fff", transparent: true, opacity: 0.8, depthWrite: false }));
+scene.add(ring);
+
+// ── HUD & CARD ──────────────────────────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+let toastTimer = 0;
+function toast(text, ms = 1600) { const m = $("msg"); m.textContent = text; m.classList.add("on"); clearTimeout(toastTimer); toastTimer = setTimeout(() => m.classList.remove("on"), ms); }
+/** Strokes over the first n holes; a hole you missed counts as maxStrokes + 1. */
+const total = (row, n = CONFIG.holes.length) => CONFIG.holes.slice(0, n).reduce((s, _, i) => s + (row.s[i] ?? CONFIG.maxStrokes + 1), 0);
+let board = null, boardFor = "";
+/** Colors other balls already use: players' and bots'. */
+const takenColors = () => new Set([...Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId).map(([, p]) => p.c), ...(parse(S.shared.bots, {}).list || []).map((b) => b.c)]);
+/** Two players with one color (both joined at once): the later sessionId picks again. */
+function fixColor() {
+  if (!Object.entries(S.entities.players || {}).some(([id, p]) => id < net.sessionId && p.c === myColor)) return;
+  const taken = takenColors();
+  myColor = COLORS.find((c) => !taken.has(c)) || myColor;
+  net.me.set("c", myColor);
+  if (myBall) { dropBall(myBall); myBall = null; }
+}
+function hud(g) {
+  fixColor();
+  if (ATTRACT) { for (const id of ["hole", "clock", "mini", "net", "hint"]) $(id).textContent = ""; $("over").hidden = true; return; }
+  const t = Date.now(), left = Math.max(0, Math.ceil((g.endsAt - t) / 1000));
+  $("hole").innerHTML = `Hole ${g.hole + 1}/${CONFIG.holes.length} <small>${esc(course.h.name)} · Par ${course.h.par} · Strokes ${me.st}</small>`;
+  $("clock").textContent = g.phase === "play" ? `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}` : "";
+  $("clock").classList.toggle("low", g.phase === "play" && left <= 10);
+  const played = g.phase === "play" ? g.hole : g.hole + 1;
+  const rows = Object.entries(g.card || {}).map(([id, r]) => ({ id, n: id === net.sessionId ? "You" : r.n, t: total(r, played) }));
+  if (!rows.some((r) => r.id === net.sessionId)) rows.push({ id: net.sessionId, n: "You", t: 0 });
+  rows.sort((a, b) => a.t - b.t);
+  $("mini").innerHTML = g.hole > 0 || g.phase !== "play" ? rows.slice(0, 5).map((r) => `<div class="${r.id === net.sessionId ? "me" : ""}"><span>${esc(r.n)}</span><span>${r.t}</span></div>`).join("") : "";
+  $("hint").textContent = g.phase === "play" && me.putts === 0 && canPutt(g) ? "Drag back from anywhere and let go to putt" : g.phase === "play" && finished(me) ? "Waiting for the others…" : "";
+  const n = livePlayers().length;
+  $("net").textContent = net.offline ? "Offline: playing with bots" : `Online · ${n} player${n === 1 ? "" : "s"}${isHost() ? " · you run the course" : ""}`;
+  $("over").hidden = g.phase === "play";
+  if (g.phase !== "play") showCard(g, t);
+}
+function showCard(g, t) {
+  const final = g.phase === "final", holes = CONFIG.holes;
+  $("overTitle").textContent = final ? "Final scores" : `After hole ${g.hole + 1}`;
+  const played = g.hole + 1, rows = Object.entries(g.card || {}).sort((a, b) => total(a[1], played) - total(b[1], played));
+  $("card").innerHTML = `<tr><th>Player</th>${holes.map((_, i) => `<th>${i + 1}</th>`).join("")}<th>Tot</th></tr>` +
+    `<tr><td>Par</td>${holes.map((h) => `<td>${h.par}</td>`).join("")}<td class="tot">${holes.reduce((s, h) => s + h.par, 0)}</td></tr>` +
+    rows.map(([id, r]) => `<tr class="${id === net.sessionId ? "me" : ""}"><td><i style="background:${esc(r.c)}"></i>${esc(id === net.sessionId ? "You" : r.n)}</td>` +
+      holes.map((h, i) => { const v = r.s[i]; return `<td class="${v == null ? "" : v < h.par ? "good" : v > h.par ? "bad" : ""}">${v ?? "–"}</td>`; }).join("") + `<td class="tot">${total(r, played)}</td></tr>`).join("");
+  $("next").textContent = `${final ? "New round" : `Hole ${g.hole + 2}`} in ${Math.max(0, Math.ceil((g.endsAt - t) / 1000))}s`;
+  $("again").hidden = $("boardBox").hidden = !final;
+  if (final && boardFor !== keyOf(g)) { boardFor = keyOf(g); showBoard(g); }
+}
+function showBoard(g) {
+  const list = $("board"), mine = g.card[net.sessionId];
+  if (!board) { list.innerHTML = "<li>Leaderboards need a connection.</li>"; return; }
+  const full = mine && CONFIG.holes.every((_, i) => mine.s[i] != null);
+  const submit = full && me.submitted !== g.id ? board.submit(Math.max(0, 1000 - total(mine))).catch(() => null) : Promise.resolve();
+  me.submitted = g.id;
+  list.innerHTML = "<li>Loading…</li>";
+  submit.then(() => board.top(10)).then(({ entries }) => {
+    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${1000 - e.score} strokes</span></li>`).join("") : "<li>No full rounds yet. Be the first.</li>";
+  }).catch(() => { list.innerHTML = "<li>Couldn't load the leaderboard.</li>"; });
+}
+$("again").onclick = () => { const g = game(); if (!g || g.phase !== "final") return; if (isHost()) newRound(g.id + 1); else net.send("again", {}); };
+
+// ── INPUT ───────────────────────────────────────────────────────────────────────────
+cv.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch {} }
+  if (ATTRACT || !canPutt(game()) || aim) return;
+  cv.setPointerCapture(e.pointerId);
+  aim = { id: e.pointerId, sx: e.clientX, sy: e.clientY, x: e.clientX, y: e.clientY };
+});
+cv.addEventListener("pointermove", (e) => { if (aim && e.pointerId === aim.id) { aim.x = e.clientX; aim.y = e.clientY; } });
+cv.addEventListener("pointerup", (e) => {
+  if (!aim || e.pointerId !== aim.id) return;
+  const shot = aimShot(); aim = null;
+  if (shot && canPutt(game())) putt(shot.a, shot.p);
+});
+cv.addEventListener("pointercancel", () => { aim = null; });
+document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+
+// ── MAIN LOOP ───────────────────────────────────────────────────────────────────────
+let last = performance.now(), lastHb = 0, lastHud = 0;
+const views = new Map(); // id -> { g, x, z, in } drawn balls for everyone but me
+const seenIn = new Map();
+let myBall = null;
+function frame(now) {
+  const dt = Math.max(0, Math.min(0.05, (now - last) / 1000)); last = now; // the first frame can be timed before load: never negative
+  if (now - lastHb > 1000) { lastHb = now; net.me.set("hb", Date.now()); }
+  if (isHost()) hostTick(dt, now); else host.wasHost = false;
+  const g = game();
+  if (g) {
+    if (!course || course.i !== g.hole % CONFIG.holes.length) showHole(g.hole);
+    myTick(dt, g);
+    // everyone else's balls, eased toward where they last said they were
+    const seen = new Set();
+    for (const b of balls(g)) {
+      if (b.mine) continue;
+      seen.add(b.id);
+      let v = views.get(b.id);
+      if (!v) { v = { g: makeBall(b.color, ATTRACT ? "" : b.name), x: b.x, z: b.z }; views.set(b.id, v); }
+      const k = b.bot && isHost() ? 1 : 1 - Math.pow(0.0001, dt);
+      v.x += (b.x - v.x) * k; v.z += (b.z - v.z) * k;
+      placeBall(v.g, v.x, v.z, b.in && Math.hypot(v.x - b.x, v.z - b.z) < 0.2);
+      const key = keyOf(g) + b.id;
+      if (b.in && !seenIn.get(key)) { seenIn.set(key, 1); if (!(b.bot && isHost())) burst(course.cup.x, course.cup.z, b.color, 30); }
+    }
+    for (const [id, v] of views) if (!seen.has(id)) { dropBall(v.g); views.delete(id); }
+    if (!myBall) myBall = makeBall(myColor, "");
+    placeBall(myBall, me.x, me.z, me.in);
+    const ready = canPutt(g) && !ATTRACT;
+    ring.visible = ready; ring.position.set(me.x, 0.02, me.z); ring.scale.setScalar(1 + Math.sin(now / 200) * 0.12);
+    const shot = aimShot();
+    arrow.visible = !!shot && ready;
+    if (shot) {
+      arrow.position.set(me.x, 0.03, me.z); arrow.rotation.y = -shot.a; arrow.scale.set(0.8 + shot.p * 3.2, 1, 1 + shot.p * 0.6);
+      arrow.material.color.setHSL((1 - shot.p) * 0.33, 0.9, 0.6);
+    }
+    // windmills, bumpers and the flag
+    const tSec = Date.now() / 1000;
+    course.windmills.forEach((w, i) => { course.windmillMeshes[i].rotation.y = -w.spin * tSec; });
+    course.bumpers.forEach((p, i) => { p.flash = Math.max(0, p.flash - dt * 3); course.bumperMeshes[i].material.emissiveIntensity = p.flash; course.bumperMeshes[i].scale.setScalar(1 + p.flash * 0.12); });
+    course.flag.rotation.y = Math.sin(tSec * 2.2) * 0.35 - 0.6;
+    if (now - lastHud > 120) { lastHud = now; hud(g); }
+  }
+  tickConfetti(dt);
+  if (ATTRACT && course) { // the preview: closer, slowly swinging around the middle of the hole
+    const az = 0.3 + Math.sin(now / 3000) * 0.18, el = 0.78, d = 21, [tx, tz] = course.h.tee;
+    cam.wantLook.set((tx + course.cup.x) / 2, 0, (tz + course.cup.z) / 2);
+    cam.wantPos.set(cam.wantLook.x + Math.cos(az) * Math.cos(el) * d, Math.sin(el) * d, cam.wantLook.z + Math.sin(az) * Math.cos(el) * d);
+  }
+  cam.pos.lerp(cam.wantPos, 1 - Math.pow(0.02, dt)); cam.look.lerp(cam.wantLook, 1 - Math.pow(0.02, dt));
+  camera.position.copy(cam.pos); camera.lookAt(cam.look);
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+
+(async function start() {
+  net = await connect();
+  net.onState((st) => { S = st; });
+  net.on("again", () => { const g = game(); if (isHost() && g && g.phase === "final") newRound(g.id + 1); });
+  net.onDisconnect(() => { $("net").textContent = "Reconnecting…"; });
+  if (!net.offline && typeof MP !== "undefined") board = MP.auth({ key: MP_CONNECT.key, apiUrl: MP_CONNECT.apiUrl }).leaderboard(CONFIG.board);
+  const taken = takenColors();
+  myColor = COLORS.find((c) => !taken.has(c)) || COLORS[Math.floor(Math.random() * COLORS.length)];
+  net.me.set({ n: myName, c: myColor, hb: Date.now() });
+  if (ATTRACT) Object.assign(CONFIG, { seats: 8, holeTime: 14000, scoresFor: 300, finalFor: 300, botWait: [250, 800] });
+  showHole(ATTRACT ? 2 : 0);
+  cam.pos.copy(cam.wantPos); cam.look.copy(cam.wantLook);
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
