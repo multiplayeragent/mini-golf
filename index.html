@@ -461,8 +461,9 @@ function botList(key) {
 }
 /** Every ball on this hole as { id, name, color, x, z, st, in, bot, mine }. */
 function balls(g) {
-  const out = [], key = keyOf(g);
+  const out = [], key = keyOf(g), live = new Set(livePlayers()); // a closed tab's ball stays in state for a while: skip it
   for (const [id, p] of Object.entries(S.entities.players || {})) {
+    if (!live.has(id)) continue;
     if (id === net.sessionId) { out.push({ id, name: myName, color: myColor, x: me.x, z: me.z, st: me.st, in: me.in, mine: true }); continue; }
     const b = parse(p.b, null); if (b && b.k === key) out.push({ id, name: p.n || "Player", color: p.c || "#ccc", x: b.x, z: b.z, st: b.st, in: b.in });
   }
@@ -601,14 +602,15 @@ const total = (row, n = CONFIG.holes.length) => CONFIG.holes.slice(0, n).reduce(
 let board = null, boardFor = "";
 /** Colors other balls already use: players' and bots'. */
 const takenColors = () => new Set([...Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId).map(([, p]) => p.c), ...(parse(S.shared.bots, {}).list || []).map((b) => b.c)]);
-/** Two players with one color (both joined at once): the later sessionId picks again. */
+/** Two players with one color (both joined at once), or a bot has mine: the later sessionId picks again. */
 function fixColor() {
-  if (!Object.entries(S.entities.players || {}).some(([id, p]) => id < net.sessionId && p.c === myColor)) return;
+  if (!Object.entries(S.entities.players || {}).some(([id, p]) => id < net.sessionId && p.c === myColor) && !(parse(S.shared.bots, {}).list || []).some((b) => b.c === myColor)) return;
   const taken = takenColors();
   myColor = COLORS.find((c) => !taken.has(c)) || myColor;
   net.me.set("c", myColor);
   if (myBall) { dropBall(myBall); myBall = null; }
 }
+let dropped = false; // true while the connection is down: the HUD keeps showing "Reconnecting…"
 function hud(g) {
   fixColor();
   if (ATTRACT) { for (const id of ["hole", "clock", "mini", "net", "hint"]) $(id).textContent = ""; $("over").hidden = true; return; }
@@ -623,7 +625,7 @@ function hud(g) {
   $("mini").innerHTML = g.hole > 0 || g.phase !== "play" ? rows.slice(0, 5).map((r) => `<div class="${r.id === net.sessionId ? "me" : ""}"><span>${esc(r.n)}</span><span>${r.t}</span></div>`).join("") : "";
   $("hint").textContent = g.phase === "play" && me.putts === 0 && canPutt(g) ? "Drag back from anywhere and let go to putt" : g.phase === "play" && finished(me) ? "Waiting for the others…" : "";
   const n = livePlayers().length;
-  $("net").textContent = net.offline ? "Offline: playing with bots" : `Online · ${n} player${n === 1 ? "" : "s"}${isHost() ? " · you run the course" : ""}`;
+  $("net").textContent = net.offline ? "Offline: playing with bots" : dropped ? "Reconnecting…" : `Online · ${n} player${n === 1 ? "" : "s"}${isHost() ? " · you run the course" : ""}`;
   $("over").hidden = g.phase === "play";
   if (g.phase !== "play") showCard(g, t);
 }
@@ -688,7 +690,8 @@ function frame(now) {
       if (b.mine) continue;
       seen.add(b.id);
       let v = views.get(b.id);
-      if (!v) { v = { g: makeBall(b.color, ATTRACT ? "" : b.name), x: b.x, z: b.z }; views.set(b.id, v); }
+      if (v && v.color !== b.color) { dropBall(v.g); views.delete(b.id); v = null; } // they changed color
+      if (!v) { v = { g: makeBall(b.color, ATTRACT ? "" : b.name), color: b.color, x: b.x, z: b.z }; views.set(b.id, v); }
       const k = b.bot && isHost() ? 1 : 1 - Math.pow(0.0001, dt);
       v.x += (b.x - v.x) * k; v.z += (b.z - v.z) * k;
       placeBall(v.g, v.x, v.z, b.in && Math.hypot(v.x - b.x, v.z - b.z) < 0.2);
@@ -729,7 +732,8 @@ function frame(now) {
   net = await connect();
   net.onState((st) => { S = st; });
   net.on("again", () => { const g = game(); if (isHost() && g && g.phase === "final") newRound(g.id + 1); });
-  net.onDisconnect(() => { $("net").textContent = "Reconnecting…"; });
+  net.onDisconnect(() => { dropped = true; $("net").textContent = "Reconnecting…"; });
+  net.onReconnect(() => { dropped = false; });
   if (!net.offline && typeof MP !== "undefined") board = MP.auth({ key: MP_CONNECT.key, apiUrl: MP_CONNECT.apiUrl }).leaderboard(CONFIG.board);
   const taken = takenColors();
   myColor = COLORS.find((c) => !taken.has(c)) || COLORS[Math.floor(Math.random() * COLORS.length)];
