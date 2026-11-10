@@ -677,6 +677,7 @@ const views = new Map(); // id -> { g, x, z, in } drawn balls for everyone but m
 const seenIn = new Map();
 let myBall = null;
 function frame(now) {
+  requestAnimationFrame(frame);
   const dt = Math.max(0, Math.min(0.05, (now - last) / 1000)); last = now; // the first frame can be timed before load: never negative
   if (now - lastHb > 1000) { lastHb = now; net.me.set("hb", Date.now()); }
   if (isHost()) hostTick(dt, now); else host.wasHost = false;
@@ -725,7 +726,6 @@ function frame(now) {
   cam.pos.lerp(cam.wantPos, 1 - Math.pow(0.02, dt)); cam.look.lerp(cam.wantLook, 1 - Math.pow(0.02, dt));
   camera.position.copy(cam.pos); camera.lookAt(cam.look);
   renderer.render(scene, camera);
-  requestAnimationFrame(frame);
 }
 
 (async function start() {
