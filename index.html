@@ -58,7 +58,7 @@
  * WHERE THINGS ARE (search for the "── " headers):
  *   CONFIG ........ timers, ball physics, bots, and the HOLES (walls, cup, obstacles)
  *   CONNECTION .... MP_CONNECT, joining, the offline room, who is host
- *   PHYSICS ....... one function moves any ball: walls, bumpers, windmills, slopes, the cup
+ *   PHYSICS ....... one function moves any ball: walls, bumpers, windmills, slopes, the cup; the bots' putt planning
  *   COURSE ........ builds the meshes of the hole being played, the camera framing
  *   ROUND (HOST) .. hole timer, scorecard, next hole, and the bots. Only the host writes these.
  *   MY BALL ....... aiming, putting, sinking. Each player writes only its own ball.
@@ -247,7 +247,44 @@ function stepBall(b, dt, t, c) {
   return ev;
 }
 const gauss = () => (Math.random() + Math.random() + Math.random() - 1.5) * 1.15;
-/** Bot brain: try many putts in a quick simulation and keep the one that ends nearest the cup. */
+/** Distance from a point to segment a-b. */
+function segDist(x, z, ax, az, bx, bz) {
+  const dx = bx - ax, dz = bz - az, l = dx * dx + dz * dz, t = l ? Math.max(0, Math.min(1, ((x - ax) * dx + (z - az) * dz) / l)) : 0;
+  return Math.hypot(x - ax - dx * t, z - az - dz * t);
+}
+/** How far each spot is from the cup going round the walls, blocks and bumpers: a grid filled outward from
+ *  the cup. Bots judge a putt by this, so they go round a block instead of stopping behind it. */
+function pathField(c) {
+  const S = 0.5, xs = c.h.walls.map((p) => p[0]), zs = c.h.walls.map((p) => p[1]), x0 = Math.min(...xs), z0 = Math.min(...zs);
+  const nx = Math.ceil((Math.max(...xs) - x0) / S) + 1, nz = Math.ceil((Math.max(...zs) - z0) / S) + 1, clear = CONFIG.ballR + WALL_T / 2 - 0.05;
+  const free = (x, z) => inside(c.h.walls, x, z) && c.segs.every((g) => segDist(x, z, g[0], g[1], g[2], g[3]) > clear) && c.bumpers.every((p) => Math.hypot(x - p.x, z - p.z) > p.r + CONFIG.ballR);
+  const ok = [], d = new Array(nx * nz).fill(Infinity);
+  for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) ok[j * nx + i] = free(x0 + i * S, z0 + j * S);
+  const ci = Math.round((c.cup.x - x0) / S), cj = Math.round((c.cup.z - z0) / S);
+  d[cj * nx + ci] = Math.hypot(x0 + ci * S - c.cup.x, z0 + cj * S - c.cup.z);
+  for (let changed = true; changed; ) { // relax every cell from its 8 neighbours until nothing gets shorter
+    changed = false;
+    for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) {
+      const k = j * nx + i; if (!ok[k] && k !== cj * nx + ci) continue;
+      for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) {
+        const ii = i + a, jj = j + b; if ((!a && !b) || ii < 0 || jj < 0 || ii >= nx || jj >= nz) continue;
+        const v = d[jj * nx + ii] + (a && b ? Math.SQRT2 : 1) * S; if (v < d[k] - 1e-9) { d[k] = v; changed = true; }
+      }
+    }
+  }
+  return { S, x0, z0, nx, nz, d };
+}
+/** The way-round distance from (x, z) to the cup (nearest grid spots; straight-line plus a penalty if none). */
+function pathTo(c, x, z) {
+  const f = c.field || (c.field = pathField(c)), i0 = Math.round((x - f.x0) / f.S), j0 = Math.round((z - f.z0) / f.S);
+  let best = Infinity;
+  for (let j = j0 - 1; j <= j0 + 1; j++) for (let i = i0 - 1; i <= i0 + 1; i++) {
+    if (i < 0 || j < 0 || i >= f.nx || j >= f.nz) continue;
+    best = Math.min(best, f.d[j * f.nx + i] + Math.hypot(x - f.x0 - i * f.S, z - f.z0 - j * f.S));
+  }
+  return best < Infinity ? best : Math.hypot(x - c.cup.x, z - c.cup.z) + 30;
+}
+/** Bot brain: try many putts in a quick simulation and keep the one that ends nearest the cup (by the way round, pathTo). */
 function planShot(b, c, skill) {
   const t0 = Date.now() / 1000, direct = Math.atan2(c.cup.z - b.z, c.cup.x - b.x);
   const angles = [];
@@ -258,7 +295,7 @@ function planShot(b, c, skill) {
     const sim = { x: b.x, z: b.z, vx: Math.cos(a) * p * CONFIG.maxPower, vz: Math.sin(a) * p * CONFIG.maxPower, moving: true, in: 0, restX: b.x, restZ: b.z, sim: true };
     let t = 0;
     while (sim.moving && t < 7) { stepBall(sim, 1 / 20, t0 + t, c); t += 1 / 20; }
-    const score = sim.in ? -10 + p : Math.hypot(sim.x - c.cup.x, sim.z - c.cup.z);
+    const score = sim.in ? -10 + p : pathTo(c, sim.x, sim.z);
     if (score < best.score) best = { a, p, score };
   }
   return { a: best.a + gauss() * CONFIG.botAim * skill, p: Math.min(1, best.p * (1 + gauss() * CONFIG.botPower * skill)) };
@@ -670,6 +707,7 @@ cv.addEventListener("pointerup", (e) => {
   if (shot && canPutt(game())) putt(shot.a, shot.p);
 });
 cv.addEventListener("pointercancel", () => { aim = null; });
+cv.addEventListener("contextmenu", (e) => e.preventDefault()); // a right-button drag putts too, without the browser menu
 document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
 
 // ── MAIN LOOP ───────────────────────────────────────────────────────────────────────
