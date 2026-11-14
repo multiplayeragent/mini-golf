@@ -31,6 +31,7 @@
   td i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
   td.good { color: #7dffb0; } td.bad { color: #ffb3a7; }
   .card ol { margin: 0; padding-left: 24px; font-size: 14px; } .card li span { float: right; }
+  .card li.note { list-style: none; margin-left: -24px; } /* a status line, not a numbered entry */
   .card p { margin: 12px 0 0; font-size: 13px; opacity: .8; }
   button.go { width: 100%; min-height: 48px; margin-top: 14px; border: 0; border-radius: 12px; background: #ffe14d; color: #2a1d00; font: 800 17px system-ui, sans-serif; cursor: pointer; }
 </style>
@@ -47,7 +48,7 @@
 <div id="over" hidden><div class="card">
   <h2 id="overTitle">Scorecard</h2>
   <table id="card"></table>
-  <div id="boardBox"><h3>Fewest strokes on this course</h3><ol id="board"><li>Loading…</li></ol></div>
+  <div id="boardBox"><h3>Fewest strokes on this course</h3><ol id="board"><li class="note">Loading…</li></ol></div>
   <p id="next"></p>
   <button class="go" id="again" hidden>Play again</button>
 </div></div>
@@ -681,14 +682,14 @@ function showCard(g, t) {
 }
 function showBoard(g) {
   const list = $("board"), mine = g.card[net.sessionId];
-  if (!board) { list.innerHTML = "<li>Leaderboards need a connection.</li>"; return; }
+  if (!board) { list.innerHTML = "<li class='note'>Leaderboards need a connection.</li>"; return; }
   const full = mine && CONFIG.holes.every((_, i) => mine.s[i] != null);
   const submit = full && me.submitted !== g.id ? board.submit(Math.max(0, 1000 - total(mine))).catch(() => null) : Promise.resolve();
   me.submitted = g.id;
-  list.innerHTML = "<li>Loading…</li>";
+  list.innerHTML = "<li class='note'>Loading…</li>";
   submit.then(() => board.top(10)).then(({ entries }) => {
-    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${1000 - e.score} strokes</span></li>`).join("") : "<li>No full rounds yet. Be the first.</li>";
-  }).catch(() => { list.innerHTML = "<li>Couldn't load the leaderboard.</li>"; });
+    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${1000 - e.score} strokes</span></li>`).join("") : "<li class='note'>No full rounds yet. Be the first.</li>";
+  }).catch(() => { list.innerHTML = "<li class='note'>Couldn't load the leaderboard.</li>"; });
 }
 $("again").onclick = () => { const g = game(); if (!g || g.phase !== "final") return; if (isHost()) newRound(g.id + 1); else net.send("again", {}); };
 
